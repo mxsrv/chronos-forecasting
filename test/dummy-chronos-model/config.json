@@ -27,7 +27,7 @@
   "use_cache": true,
   "vocab_size": 32,
   "chronos_config": {
-    "tokenizer_class": "MeanScaleUniformBins",
+    "tokenizer_class": "IQRScaleUniformBins",
     "tokenizer_kwargs": {
       "low_limit": -15.0,
       "high_limit": 15.0
