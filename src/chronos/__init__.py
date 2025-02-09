@@ -11,6 +11,7 @@ from .chronos import (
     ChronosTokenizer,
     MeanScaleUniformBins,
     IQRScaleUniformBins,
+    LogScaleUniformBins,
 )
 from .chronos_bolt import ChronosBoltConfig, ChronosBoltPipeline
 
@@ -23,6 +24,7 @@ __all__ = [
     "ChronosTokenizer",
     "MeanScaleUniformBins",
     "IQRScaleUniformBins",
+    "LogScaleUniformBins",
     "ChronosBoltConfig",
     "ChronosBoltPipeline",
 ]

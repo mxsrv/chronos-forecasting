@@ -16,6 +16,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+import numpy as np
 
 import sys
 from pathlib import Path
@@ -204,11 +205,9 @@ class MeanScaleUniformBins(ChronosTokenizer):
             )
             + self.config.n_special_tokens
         )
-
         token_ids.clamp_(0, self.config.n_tokens - 1)
 
         token_ids[~attention_mask] = self.config.pad_token_id
-
         return token_ids, attention_mask, scale
 
     def _append_eos_token(
@@ -219,7 +218,6 @@ class MeanScaleUniformBins(ChronosTokenizer):
         token_ids = torch.concat((token_ids, eos_tokens), dim=1)
         eos_mask = torch.full((batch_size, 1), fill_value=True)
         attention_mask = torch.concat((attention_mask, eos_mask), dim=1)
-
         return token_ids, attention_mask
 
     def context_input_transform(
@@ -236,7 +234,6 @@ class MeanScaleUniformBins(ChronosTokenizer):
             token_ids, attention_mask = self._append_eos_token(
                 token_ids=token_ids, attention_mask=attention_mask
             )
-
         return token_ids, attention_mask, scale
 
     def label_input_transform(
@@ -251,7 +248,6 @@ class MeanScaleUniformBins(ChronosTokenizer):
             token_ids, attention_mask = self._append_eos_token(
                 token_ids=token_ids, attention_mask=attention_mask
             )
-
         return token_ids, attention_mask
 
     def output_transform(
@@ -370,6 +366,108 @@ class IQRScaleUniformBins(ChronosTokenizer):
             max=len(self.centers) - 1,
         )
         return self.centers[indices] * scale_unsqueezed
+    
+
+
+#class MeanScaleQuantileBins(ChronosTokenizer):
+
+class LogScaleUniformBins(ChronosTokenizer):
+    def __init__(self, low_limit: float, high_limit: float, config: ChronosConfig) -> None:
+        self.config = config
+        self.centers = torch.linspace(
+            torch.log1p(torch.tensor(abs(low_limit))) * torch.sign(torch.tensor(low_limit)),
+            torch.log1p(torch.tensor(abs(high_limit))) * torch.sign(torch.tensor(high_limit)),
+            config.n_tokens - config.n_special_tokens - 1,
+        )
+        self.boundaries = torch.concat(
+            (
+                torch.tensor([-1e20], device=self.centers.device),
+                (self.centers[1:] + self.centers[:-1]) / 2,
+                torch.tensor([1e20], device=self.centers.device),
+            )
+        )
+
+    def _input_transform(
+        self, context: torch.Tensor, scale: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        context = context.to(dtype=torch.float32)
+        attention_mask = ~torch.isnan(context)
+        
+        if scale is None:
+            scale = torch.nansum(
+                torch.abs(context) * attention_mask, dim=-1
+            ) / torch.nansum(attention_mask, dim=-1)
+            scale[~(scale > 0)] = 1.0
+        
+        scaled_context = torch.log1p(torch.abs(context / scale.unsqueeze(dim=-1))) * torch.sign(context)
+        
+        token_ids = (
+            torch.bucketize(
+                input=scaled_context,
+                boundaries=self.boundaries,
+                right=True,
+            )
+            + self.config.n_special_tokens
+        )
+
+        token_ids.clamp_(0, self.config.n_tokens - 1)
+        token_ids[~attention_mask] = self.config.pad_token_id
+
+        return token_ids, attention_mask, scale
+
+    def _append_eos_token(
+        self, token_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = token_ids.shape[0]
+        eos_tokens = torch.full((batch_size, 1), fill_value=self.config.eos_token_id)
+        token_ids = torch.concat((token_ids, eos_tokens), dim=1)
+        eos_mask = torch.full((batch_size, 1), fill_value=True)
+        attention_mask = torch.concat((attention_mask, eos_mask), dim=1)
+
+        return token_ids, attention_mask
+
+    def context_input_transform(
+        self, context: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        length = context.shape[-1]
+
+        if length > self.config.context_length:
+            context = context[..., -self.config.context_length :]
+
+        token_ids, attention_mask, scale = self._input_transform(context=context)
+
+        if self.config.use_eos_token and self.config.model_type == "seq2seq":
+            token_ids, attention_mask = self._append_eos_token(
+                token_ids=token_ids, attention_mask=attention_mask
+            )
+
+        return token_ids, attention_mask, scale
+
+    def label_input_transform(
+        self, label: torch.Tensor, scale: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        length = label.shape[-1]
+
+        assert length == self.config.prediction_length
+        token_ids, attention_mask, _ = self._input_transform(context=label, scale=scale)
+
+        if self.config.use_eos_token:
+            token_ids, attention_mask = self._append_eos_token(
+                token_ids=token_ids, attention_mask=attention_mask
+            )
+
+        return token_ids, attention_mask
+
+    def output_transform(
+        self, samples: torch.Tensor, scale: torch.Tensor
+    ) -> torch.Tensor:
+        scale_unsqueezed = scale.unsqueeze(-1).unsqueeze(-1)
+        indices = torch.clamp(
+            samples - self.config.n_special_tokens - 1,
+            min=0,
+            max=len(self.centers) - 1,
+        )
+        return torch.expm1(self.centers[indices]) * scale_unsqueezed
 
 
 class ChronosModel(nn.Module):
@@ -508,7 +606,7 @@ class ChronosPipeline(BaseChronosPipeline):
     def __init__(self, tokenizer, model):
         super().__init__(inner_model=model.model)
         self.tokenizer = tokenizer
-        print(tokenizer.config)
+        print(f"T-Config: {tokenizer.config}")
         self.model = model
 
     def _prepare_and_validate_context(
@@ -619,10 +717,12 @@ class ChronosPipeline(BaseChronosPipeline):
         predictions = []
         remaining = prediction_length
 
+
         while remaining > 0:
             token_ids, attention_mask, scale = self.tokenizer.context_input_transform(
                 context_tensor
             )
+
             samples = self.model(
                 token_ids.to(self.model.device),
                 attention_mask.to(self.model.device),
@@ -632,9 +732,11 @@ class ChronosPipeline(BaseChronosPipeline):
                 top_k,
                 top_p,
             )
+
             prediction = self.tokenizer.output_transform(
                 samples.to(scale.device), scale
             )
+
 
             predictions.append(prediction)
             remaining -= prediction.shape[-1]
@@ -685,7 +787,9 @@ class ChronosPipeline(BaseChronosPipeline):
         assert hasattr(config, "chronos_config"), "Not a Chronos config file"
 
         chronos_config = ChronosConfig(**config.chronos_config)
-        chronos_config.tokenizer_class = "IQRScaleUniformBins"
+        chronos_config.tokenizer_class = kwargs.get("tokenizer_class", "MeanScaleUniformBins")
+        chronos_config.tokenizer_kwargs = kwargs.get("tokenizer_kwargs", {'low_limit': -15.0, 'high_limit': 15.0})
+        kwargs.pop("tokenizer_kwargs", None)
 
         if chronos_config.model_type == "seq2seq":
             inner_model = AutoModelForSeq2SeqLM.from_pretrained(*args, **kwargs)
