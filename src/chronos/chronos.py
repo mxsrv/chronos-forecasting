@@ -281,7 +281,7 @@ class IQRScaleUniformBins(ChronosTokenizer):
         print("Using IQR Scaling")
 
     def _input_transform(
-        self, context: torch.Tensor
+        self, context: torch.Tensor, scale: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         context = context.to(dtype=torch.float32)
         attention_mask = ~torch.isnan(context)
@@ -386,6 +386,7 @@ class LogScaleUniformBins(ChronosTokenizer):
                 torch.tensor([1e20], device=self.centers.device),
             )
         )
+        print("Using Log Scaling")
 
     def _input_transform(
         self, context: torch.Tensor, scale: Optional[torch.Tensor] = None
@@ -606,7 +607,6 @@ class ChronosPipeline(BaseChronosPipeline):
     def __init__(self, tokenizer, model):
         super().__init__(inner_model=model.model)
         self.tokenizer = tokenizer
-        print(f"T-Config: {tokenizer.config}")
         self.model = model
 
     def _prepare_and_validate_context(

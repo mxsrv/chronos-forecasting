@@ -20,6 +20,8 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.utils.data import IterableDataset, get_worker_info
+import torch._dynamo as dyn
+dyn.config.suppress_errors = True
 import transformers
 from transformers import (
     AutoModelForSeq2SeqLM,
@@ -44,7 +46,11 @@ from gluonts.transform import (
     LastValueImputation,
 )
 
-from chronos import ChronosConfig, ChronosTokenizer
+
+sys.path.append(str(Path.cwd().parent.parent / "chronos-forecasting"))
+
+
+from src.chronos.chronos import ChronosConfig, ChronosTokenizer
 
 
 app = typer.Typer(pretty_exceptions_enable=False)
